@@ -1,3 +1,40 @@
 # mysql-s3-backup
 
-Go MySQL backup to S3.
+Go 编写的单次备份工具：调用 MySQL 8.4 `mysqldump`，gzip 压缩，成功后上传 S3 兼容存储（AWS S3、MinIO 等）。失败退出码为 1，不会将失败的 dump 上传为备份。临时文件自动清理，需要足够的临时磁盘空间。
+
+## 运行
+
+复制 `.env.example` 为 `.env` 并修改连接信息，然后运行：
+
+```sh
+docker run --rm --env-file .env <registry>/<namespace>/mysql-s3-backup:latest
+```
+
+每次运行备份一次，可通过 cron 或 Kubernetes CronJob 调度。`MYSQL_DATABASES` 用空格分隔，留空备份全部数据库。`S3_ENDPOINT` 支持 HTTPS（默认）或显式 HTTP，使用 path-style 寻址。支持 `AWS_SESSION_TOKEN` 临时凭据。`BACKUP_TIMEOUT` 默认 `2h`，覆盖 dump 和上传全过程。对象路径为 `S3_PREFIX/YYYY/MM/DD/<UTC时间>.sql.gz`，默认前缀 `mysql`。
+
+`MYSQL_USER` 需要选定数据库的读取、视图、触发器、例程与事件等相关备份权限。`--single-transaction` 用于 InnoDB 一致性备份；备份期间避免 DDL，非事务表需另行安排锁定。镜像自带 MySQL 8.4 客户端；其他服务端版本应先验证客户端兼容性。
+
+## CI 镜像构建
+
+main 分支 push、`v*` tag push 或手动触发 GitHub Actions。先执行测试和 vet，再构建 linux/amd64 镜像并推送阿里云。main 产出 `latest` 和 commit SHA 标签；tag 产出版本标签。
+
+与 `sxxpqp/docker_image_pusher` 使用完全相同的 **GitHub Actions Secrets 名称**：
+
+| Secret | 用途 |
+|---|---|
+| ALIYUN_REGISTRY | 镜像仓库地址，不带协议 |
+| ALIYUN_NAME_SPACE | 仓库命名空间 |
+| ALIYUN_REGISTRY_USER | 登录用户名 |
+| ALIYUN_REGISTRY_PASSWORD | 登录密码 |
+
+Secrets 不会跨仓库自动继承；在本仓库设置同名值，或配置允许本仓库访问的组织级 Secrets。运行时 MySQL/S3 环境变量见 `.env.example`，与构建凭据独立。
+
+## 恢复验证
+
+从 S3 下载文件后，在隔离测试数据库恢复：
+
+```sh
+gzip -dc backup.sql.gz | mysql -h test-mysql -u restore -p
+```
+
+请定期执行恢复验证。程序不自动删除历史对象，可用存储桶生命周期规则控制保留时间。
