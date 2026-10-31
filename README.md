@@ -167,13 +167,36 @@ cron 使用标准五字段：**分 时 日 月 周**，不包含秒。
 
 使用 [deployment.yaml](deploy/k8s/deployment.yaml)，无需 CronJob。默认单副本、Recreate 更新策略、amd64 节点、Always 拉取策略。保持单副本，避免重复备份。
 
-创建 namespace 和运行参数 Secret：
+### 4.1 创建 envFrom 引用的运行参数 Secret
+
+`envFrom.secretRef.name: mysql-s3-backup-env` 表示：把同一 namespace 中名为 `mysql-s3-backup-env` 的 Secret 内所有键值注入容器环境变量。Deployment 不会自动创建这个 Secret，必须先创建，否则 Pod 会报 `CreateContainerConfigError`。
+
+先在项目根目录准备 `.env`，填写真实 MySQL/S3 参数。已有 `.env` 时不要用模板覆盖：
+
+```bash
+# 仅首次配置时执行
+cp .env.example .env
+chmod 600 .env
+vi .env
+```
+
+再创建 namespace，并从 `.env` 导入 Secret。以下命令既可首次创建，也可更新已有 Secret：
 
 ```bash
 kubectl create namespace backup --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n backup create secret generic mysql-s3-backup-env \
   --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+确认 Secret 已创建（不输出其中的密码、密钥）：
+
+```bash
+kubectl -n backup get secret mysql-s3-backup-env
+```
+
+这个 Secret 存放 MySQL/S3 运行参数，与镜像拉取 Secret `registry-credentials` 是两个不同资源。若修改 namespace，Secret 和 Deployment 必须一起改到同一个 namespace。
+
+### 4.2 创建镜像拉取 Secret 并部署
 
 私有镜像需要同 namespace 的 `registry-credentials`。先执行 `docker login registry.cn-hangzhou.aliyuncs.com`；若 Docker 配置直接包含 auths 认证信息，可导入：
 
