@@ -17,7 +17,8 @@ MYSQL_HOST=10.0.0.10
 MYSQL_PORT=3306
 MYSQL_USER=backup
 MYSQL_PASSWORD=replace-me
-MYSQL_DATABASES=app1 app2
+# 留空备份全部数据库；指定多个数据库时用空格分隔，例如 app1 app2
+MYSQL_DATABASES=
 S3_ENDPOINT=https://s3.example.com
 S3_BUCKET=db-backup
 S3_PREFIX=mysql/production
