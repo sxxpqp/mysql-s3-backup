@@ -167,7 +167,7 @@ kubectl -n backup logs -f deployment/mysql-s3-backup
 
 日志时间与计划时间统一使用 BACKUP_TIMEZONE（默认 Asia/Shanghai），使用带偏移的 ISO 时间，例如 `2026-10-31T12:00:00+08:00`。旧版日志前缀使用容器 UTC 时间，因此 04:00 与计划中的 12:00+08:00 是同一时刻，不是备份延迟。
 
-Log timestamps, scheduled execution times, backup date folders and backup filenames all use BACKUP_TIMEZONE. A round uses one shared start timestamp; filenames include nanoseconds and UTC offset to reduce collisions. Startup probe timestamps remain UTC.
+Log timestamps, scheduled execution times, backup date folders, backup filenames and startup probe filenames all use BACKUP_TIMEZONE. A round uses one shared start timestamp; filenames include nanoseconds and UTC offset to reduce collisions.
 
 每次备份打印开始、数据库范围、超时、dump/压缩开始与耗时、压缩文件字节数和 MiB、上传目标与耗时、整体结果与总耗时，以及下次备份时间和等待时长。不打印数据库密码、S3 密钥或 SQL 内容。日志按阶段输出，大型 dump 运行期间不持续打印百分比。
 
@@ -191,7 +191,7 @@ With MYSQL_DATABASES empty, discover visible databases (including mysql, excludi
 每次启动（含单次模式）都先执行连接检查，通过后才开始备份或进入定时调度：
 
 1. MySQL：使用相同的地址、用户和密码登录，执行 SELECT 1，确认网络、认证和查询可用。
-2. S3：向 `S3_PREFIX/.connection-checks/<UTC时间>.txt` 上传很小的探针，验证桶存在及当前密钥在该路径具有写权限。不会创建存储桶，不需要额外 ListBucket 权限。
+2. S3：向 `S3_PREFIX/.connection-checks/<配置时区的时间>.txt` 上传很小的探针（例如 `20261031T121635.567011619+0800.txt`），验证桶存在及当前密钥在该路径具有写权限。不会创建存储桶，不需要额外 ListBucket 权限。
 3. 尝试删除刚创建的探针。没有删除权限时打印 WARNING 并继续，探针会保留，可手动清理或设置生命周期规则。
 
 STARTUP_CHECK_TIMEOUT 默认 30s，覆盖上述全部步骤。MySQL/S3 登录或上传检查失败时退出码为 1，不进入等待计划时间的状态；Compose 和 Deployment 将根据重启策略重试。日志会显示失败步骤与耗时，不输出密码或密钥。

@@ -96,6 +96,16 @@ func TestStartupChecks(t *testing.T) {
 				if !strings.HasPrefix(r.URL.Path, "/backups/mysql/.connection-checks/") {
 					t.Errorf("unexpected probe path %s", r.URL.Path)
 				}
+				name := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+				probeTime, err := time.Parse("20060102T150405.000000000-0700.txt", name)
+				if err != nil {
+					t.Errorf("invalid probe timestamp: %s", name)
+				} else {
+					_, offset := probeTime.Zone()
+					if offset != 8*60*60 {
+						t.Errorf("probe timezone offset: %d", offset)
+					}
+				}
 				_, _ = io.Copy(io.Discard, r.Body)
 				switch r.Method {
 				case "PUT":
@@ -125,7 +135,7 @@ func TestStartupChecks(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for k, v := range map[string]string{"MYSQL_HOST": "localhost", "MYSQL_USER": "backup", "MYSQL_BIN": exe, "FAKE_DUMP": mode, "S3_ENDPOINT": server.URL, "S3_BUCKET": "backups", "S3_PREFIX": "mysql", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "testsecret", "STARTUP_CHECK_TIMEOUT": "10s"} {
+			for k, v := range map[string]string{"MYSQL_HOST": "localhost", "MYSQL_USER": "backup", "MYSQL_BIN": exe, "FAKE_DUMP": mode, "S3_ENDPOINT": server.URL, "S3_BUCKET": "backups", "S3_PREFIX": "mysql", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "testsecret", "STARTUP_CHECK_TIMEOUT": "10s", "BACKUP_TIMEZONE": "Asia/Shanghai"} {
 				t.Setenv(k, v)
 			}
 			if mode == "timeout" {

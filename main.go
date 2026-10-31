@@ -159,7 +159,11 @@ func startupCheck(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	key := path.Join(env("S3_PREFIX", "mysql"), ".connection-checks", time.Now().UTC().Format("20060102T150405.000000000Z")+".txt")
+	location, err := time.LoadLocation(env("BACKUP_TIMEZONE", "Asia/Shanghai"))
+	if err != nil {
+		return fmt.Errorf("invalid BACKUP_TIMEZONE: %w", err)
+	}
+	key := path.Join(env("S3_PREFIX", "mysql"), ".connection-checks", time.Now().In(location).Format("20060102T150405.000000000-0700")+".txt")
 	log.Printf("startup check: S3 bucket upload destination=s3://%s/%s", os.Getenv("S3_BUCKET"), key)
 	payload := "mysql-s3-backup startup connection check\n"
 	if _, err := client.PutObject(ctx, os.Getenv("S3_BUCKET"), key, strings.NewReader(payload), int64(len(payload)), minio.PutObjectOptions{ContentType: "text/plain"}); err != nil {
