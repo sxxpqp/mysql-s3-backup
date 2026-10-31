@@ -29,7 +29,7 @@ S3_ENDPOINT=https://s3.amazonaws.com
 # 存储桶名称：需提前创建，例如 rook / Existing bucket name, e.g. rook
 S3_BUCKET=rook
 # 桶内路径前缀：类似文件夹，不是另一个桶；默认 mysql / Object key prefix inside the bucket, like a folder; default mysql
-# 示例路径 / Example: s3://rook/mysql/<database>/YYYY/MM/DD/<UTC timestamp>.sql.gz
+# 示例路径 / Example: s3://rook/mysql/YYYYMMDD/<database>-<backup timestamp>.sql.gz
 S3_PREFIX=mysql
 # S3 区域：按服务商配置 / S3 region configured by your provider
 AWS_REGION=us-east-1
@@ -47,7 +47,7 @@ STARTUP_CHECK_TIMEOUT=30s
 # 五字段 cron：分 时 日 月 周；每天 02:00；留空仅运行一次 / Five-field cron: minute hour day month weekday; empty = run once
 # 其他示例 / More examples: */30 * * * * = every 30 minutes; 0 */6 * * * = at 00:00, 06:00, 12:00, 18:00
 BACKUP_INTERVAL=0 2 * * *
-# 调度和日志时区：默认北京时间，日志带 +08:00；文件名仍使用 UTC / Schedule and log timezone; object timestamps remain UTC
+# 调度、日志和备份文件时区：默认北京时间 / Timezone for schedule, logs, date folders and backup filenames
 BACKUP_TIMEZONE=Asia/Shanghai
 ```
 
@@ -90,7 +90,7 @@ BACKUP_TIMEZONE=Asia/Shanghai
 - `*/30 * * * *`：每半小时。
 - `0 2 * * 1`：每周一 02:00。
 
-启动后日志会打印下一次执行时间。备份串行执行，耗时跨过的计划点会跳过；失败后等待下一个计划点，不补跑。默认北京时间，S3 文件名仍使用 UTC。兼容旧的 `24h` 时长格式，旧格式会启动立即备份，之后按完成时间计算间隔。
+启动后日志会打印下一次执行时间。备份串行执行，耗时跨过的计划点会跳过；失败后等待下一个计划点，不补跑。默认北京时间，S3 日期目录和文件时间也使用 BACKUP_TIMEZONE。兼容旧的 `24h` 时长格式，旧格式会启动立即备份，之后按完成时间计算间隔。
 
 修改 `.env` 后执行 `docker compose up -d --force-recreate`。立即手动备份：`docker compose run --rm -e BACKUP_INTERVAL= backup`。停止定时容器：`docker compose down`。临时文件使用挂载到 /tmp 的数据卷，需要足够磁盘空间。
 
@@ -167,7 +167,7 @@ kubectl -n backup logs -f deployment/mysql-s3-backup
 
 日志时间与计划时间统一使用 BACKUP_TIMEZONE（默认 Asia/Shanghai），使用带偏移的 ISO 时间，例如 `2026-10-31T12:00:00+08:00`。旧版日志前缀使用容器 UTC 时间，因此 04:00 与计划中的 12:00+08:00 是同一时刻，不是备份延迟。
 
-Log timestamps and scheduled execution times both use BACKUP_TIMEZONE, including the UTC offset. S3 object names intentionally remain UTC; `20261031T040017Z` is `2026-10-31T12:00:17+08:00`.
+Log timestamps, scheduled execution times, backup date folders and backup filenames all use BACKUP_TIMEZONE. A round uses one shared start timestamp; filenames include nanoseconds and UTC offset to reduce collisions. Startup probe timestamps remain UTC.
 
 每次备份打印开始、数据库范围、超时、dump/压缩开始与耗时、压缩文件字节数和 MiB、上传目标与耗时、整体结果与总耗时，以及下次备份时间和等待时长。不打印数据库密码、S3 密钥或 SQL 内容。日志按阶段输出，大型 dump 运行期间不持续打印百分比。
 
@@ -181,8 +181,8 @@ With MYSQL_DATABASES empty, discover visible databases (including mysql, excludi
 
 路径示例 / Example object paths:
 
-- s3://rook/mysql/app1/2026/10/31/<round UTC timestamp>.sql.gz
-- s3://rook/mysql/app2/2026/10/31/<round UTC timestamp>.sql.gz
+- s3://rook/mysql/20261031/app1-20261031T120000.123456789+0800.sql.gz
+- s3://rook/mysql/20261031/app2-20261031T120000.123456789+0800.sql.gz
 
 每轮按库串行执行并及时删除该库临时文件。日志显示库名、进度、各库结果，以及总数、成功、失败、跳过数量。各库快照时间不同，不保证跨库同一时点一致性。不要对正在执行的定时任务再同时手动触发备份。
 

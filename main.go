@@ -78,14 +78,18 @@ func run(ctx context.Context) (result error) {
 	var failures []error
 	succeeded := 0
 	failed := 0
-	stamp := started.UTC().Format("2006/01/02/20060102T150405.000000000Z")
+	location, err := time.LoadLocation(env("BACKUP_TIMEZONE", "Asia/Shanghai"))
+	if err != nil {
+		return fmt.Errorf("invalid BACKUP_TIMEZONE: %w", err)
+	}
+	roundTime := started.In(location)
 	for i, database := range databases {
 		if ctx.Err() != nil {
 			failures = append(failures, ctx.Err())
 			break
 		}
 		log.Printf("database backup started: database=%q progress=%d/%d", database, i+1, len(databases))
-		if err := backupDatabase(ctx, client, database, stamp); err != nil {
+		if err := backupDatabase(ctx, client, database, roundTime); err != nil {
 			failed++
 			log.Printf("database backup failed: database=%q error=%v", database, err)
 			failures = append(failures, fmt.Errorf("database %q: %w", database, err))
@@ -213,7 +217,11 @@ func listDatabases(ctx context.Context) ([]string, error) {
 	return unique, nil
 }
 
-func backupDatabase(ctx context.Context, client *minio.Client, database, stamp string) error {
+func backupObjectKey(prefix, database string, roundTime time.Time) string {
+	return path.Join(prefix, roundTime.Format("20060102"), url.PathEscape(database)+"-"+roundTime.Format("20060102T150405.000000000-0700")+".sql.gz")
+}
+
+func backupDatabase(ctx context.Context, client *minio.Client, database string, roundTime time.Time) error {
 	started := time.Now()
 	// Only upload a complete, successful dump. Temporary backup is removed on every exit.
 	file, err := os.CreateTemp("", "mysql-backup-*.sql.gz")
@@ -248,7 +256,7 @@ func backupDatabase(ctx context.Context, client *minio.Client, database, stamp s
 		return err
 	}
 	log.Printf("dump completed: database=%q elapsed=%s compressed_bytes=%d compressed_mib=%.2f", database, time.Since(dumpStarted).Round(time.Millisecond), size, float64(size)/(1024*1024))
-	key := path.Join(env("S3_PREFIX", "mysql"), url.PathEscape(database), stamp+".sql.gz")
+	key := backupObjectKey(env("S3_PREFIX", "mysql"), database, roundTime)
 	uploadStarted := time.Now()
 	log.Printf("upload started: destination=s3://%s/%s bytes=%d", os.Getenv("S3_BUCKET"), key, size)
 	_, err = client.PutObject(ctx, os.Getenv("S3_BUCKET"), key, file, size, minio.PutObjectOptions{ContentType: "application/gzip"})
@@ -324,7 +332,7 @@ func main() {
 	}
 	log.SetFlags(0)
 	log.SetOutput(timezoneLogWriter{output: os.Stderr, location: location})
-	log.Printf("service started: timezone=%s schedule=%q timeout=%q object_timestamps=UTC", location, os.Getenv("BACKUP_INTERVAL"), env("BACKUP_TIMEOUT", "2h"))
+	log.Printf("service started: timezone=%s schedule=%q timeout=%q object_timestamps=%s", location, os.Getenv("BACKUP_INTERVAL"), env("BACKUP_TIMEOUT", "2h"), location)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := startupCheck(ctx); err != nil {

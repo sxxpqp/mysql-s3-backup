@@ -18,6 +18,21 @@ import (
 	"time"
 )
 
+func TestBackupObjectKey(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instant := time.Date(2026, 10, 31, 16, 10, 17, 123456789, time.UTC).In(location)
+	want := "mysql/20261101/app-prod-20261101T001017.123456789+0800.sql.gz"
+	if got := backupObjectKey("mysql", "app-prod", instant); got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if got := backupObjectKey("mysql", "a/b", instant); !strings.Contains(got, "/a%2Fb-") {
+		t.Fatalf("database created extra path segment: %q", got)
+	}
+}
+
 func TestLogTimezone(t *testing.T) {
 	location, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
@@ -206,7 +221,11 @@ func TestBackup(t *testing.T) {
 					return
 				}
 				defer reader.Close()
-				database := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")[2]
+				segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+				if len(segments) != 4 || len(segments[2]) != 8 {
+					t.Errorf("unexpected backup path: %s", r.URL.Path)
+				}
+				database := strings.SplitN(segments[len(segments)-1], "-", 2)[0]
 				data, err := io.ReadAll(reader)
 				if err != nil || string(data) != "CREATE DATABASE "+database+";\n" {
 					t.Errorf("bad dump: %q %v", data, err)
