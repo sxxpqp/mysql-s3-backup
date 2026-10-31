@@ -44,6 +44,17 @@ func TestLogTimezone(t *testing.T) {
 func TestMain(m *testing.M) {
 	if mode := os.Getenv("FAKE_DUMP"); mode != "" {
 		for _, arg := range os.Args[1:] {
+			if arg == "--execute=SELECT 1" {
+				if mode == "mysql-fail" {
+					os.Exit(2)
+				}
+				if mode == "mysql-bad-response" {
+					fmt.Print("unexpected\n")
+					os.Exit(0)
+				}
+				fmt.Print("1\n")
+				os.Exit(0)
+			}
 			if strings.HasPrefix(arg, "--execute=") {
 				fmt.Print("61707031\n61707032\n6d7973716c\n")
 				os.Exit(0)
@@ -60,6 +71,73 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestStartupChecks(t *testing.T) {
+	for _, mode := range []string{"ok", "mysql-fail", "mysql-bad-response", "s3-denied", "delete-denied", "timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			var puts, deletes atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasPrefix(r.URL.Path, "/backups/mysql/.connection-checks/") {
+					t.Errorf("unexpected probe path %s", r.URL.Path)
+				}
+				_, _ = io.Copy(io.Discard, r.Body)
+				switch r.Method {
+				case "PUT":
+					puts.Add(1)
+					if mode == "s3-denied" {
+						w.WriteHeader(403)
+						_, _ = io.WriteString(w, "<Error><Code>AccessDenied</Code><Message>denied</Message></Error>")
+						return
+					}
+					w.Header().Set("ETag", `"probe"`)
+					w.WriteHeader(200)
+				case "DELETE":
+					deletes.Add(1)
+					if mode == "delete-denied" {
+						w.WriteHeader(403)
+						_, _ = io.WriteString(w, "<Error><Code>AccessDenied</Code><Message>denied</Message></Error>")
+						return
+					}
+					w.WriteHeader(204)
+				default:
+					t.Errorf("unexpected method %s", r.Method)
+					w.WriteHeader(400)
+				}
+			}))
+			defer server.Close()
+			exe, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k, v := range map[string]string{"MYSQL_HOST": "localhost", "MYSQL_USER": "backup", "MYSQL_BIN": exe, "FAKE_DUMP": mode, "S3_ENDPOINT": server.URL, "S3_BUCKET": "backups", "S3_PREFIX": "mysql", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "testsecret", "STARTUP_CHECK_TIMEOUT": "10s"} {
+				t.Setenv(k, v)
+			}
+			if mode == "timeout" {
+				t.Setenv("STARTUP_CHECK_TIMEOUT", "1ns")
+			}
+			err = startupCheck(context.Background())
+			if mode == "ok" || mode == "delete-denied" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if puts.Load() != 1 || deletes.Load() != 1 {
+					t.Fatal("expected upload and cleanup")
+				}
+			} else {
+				if err == nil {
+					t.Fatal("expected startup failure")
+				}
+				if mode == "s3-denied" {
+					if puts.Load() != 1 || deletes.Load() != 0 {
+						t.Fatal("unexpected failed upload behavior")
+					}
+				} else if puts.Load() != 0 || deletes.Load() != 0 {
+					t.Fatal("S3 was contacted after MySQL check failed")
+				}
+			}
+		})
+	}
 }
 
 func TestScheduledBackupContinuesAfterFailureAndStops(t *testing.T) {

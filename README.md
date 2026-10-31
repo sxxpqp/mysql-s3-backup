@@ -42,3 +42,4 @@ gzip -dc backup.sql.gz | mysql -h test-mysql -u restore -p
 请定期执行恢复验证。程序不自动删除历史对象，可用存储桶生命周期规则控制保留时间。
 
 每个文件仅包含一个数据库的 CREATE DATABASE、USE 和该库数据，恢复时可分别导入。不同数据库是依次建立事务快照，不保证跨库同一时点一致性。库名在对象路径中按 URL path segment 编码。
+每次启动先检查 MySQL 登录与 SELECT 1，再向 S3 上传小型探针并尝试清理，默认总超时 STARTUP_CHECK_TIMEOUT=30s。连接或上传失败退出，不进入定时调度；无删除权限仅警告探针残留。详见部署说明。

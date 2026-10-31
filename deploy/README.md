@@ -42,6 +42,8 @@ AWS_SECRET_ACCESS_KEY=replace-me
 
 # 整轮备份超时：所有库的发现、dump、压缩、上传共用此时限 / Whole backup round timeout shared by discovery and all database dumps/uploads
 BACKUP_TIMEOUT=2h
+# 启动连接检查总超时：MySQL 登录/查询与 S3 探针上传清理 / Startup timeout shared by MySQL login/query and S3 probe upload/cleanup
+STARTUP_CHECK_TIMEOUT=30s
 # 五字段 cron：分 时 日 月 周；每天 02:00；留空仅运行一次 / Five-field cron: minute hour day month weekday; empty = run once
 # 其他示例 / More examples: */30 * * * * = every 30 minutes; 0 */6 * * * = at 00:00, 06:00, 12:00, 18:00
 BACKUP_INTERVAL=0 2 * * *
@@ -183,3 +185,17 @@ With MYSQL_DATABASES empty, discover visible databases (including mysql, excludi
 - s3://rook/mysql/app2/2026/10/31/<round UTC timestamp>.sql.gz
 
 每轮按库串行执行并及时删除该库临时文件。日志显示库名、进度、各库结果，以及总数、成功、失败、跳过数量。各库快照时间不同，不保证跨库同一时点一致性。不要对正在执行的定时任务再同时手动触发备份。
+
+## 启动连接检查 / Startup connection checks
+
+每次启动（含单次模式）都先执行连接检查，通过后才开始备份或进入定时调度：
+
+1. MySQL：使用相同的地址、用户和密码登录，执行 SELECT 1，确认网络、认证和查询可用。
+2. S3：向 `S3_PREFIX/.connection-checks/<UTC时间>.txt` 上传很小的探针，验证桶存在及当前密钥在该路径具有写权限。不会创建存储桶，不需要额外 ListBucket 权限。
+3. 尝试删除刚创建的探针。没有删除权限时打印 WARNING 并继续，探针会保留，可手动清理或设置生命周期规则。
+
+STARTUP_CHECK_TIMEOUT 默认 30s，覆盖上述全部步骤。MySQL/S3 登录或上传检查失败时退出码为 1，不进入等待计划时间的状态；Compose 和 Deployment 将根据重启策略重试。日志会显示失败步骤与耗时，不输出密码或密钥。
+
+Every startup checks MySQL authentication with SELECT 1 and uploads a small S3 probe before entering the schedule. Failed connection/upload checks exit with status 1. Probe cleanup is best effort; missing delete permission produces a warning. STARTUP_CHECK_TIMEOUT bounds the entire check sequence (default 30s).
+
+检查只证明当时连接和探针写入正常；不保证所有数据库表、视图、例程的 dump 权限，也不保证未来网络或每个数据库目录的桶策略可用，实际备份结果仍以逐库上传日志为准。

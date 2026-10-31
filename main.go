@@ -53,10 +53,8 @@ func run(ctx context.Context) (result error) {
 			log.Printf("backup completed: elapsed=%s", time.Since(started).Round(time.Millisecond))
 		}
 	}()
-	for _, key := range []string{"MYSQL_HOST", "MYSQL_USER", "S3_ENDPOINT", "S3_BUCKET", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
-		if os.Getenv(key) == "" {
-			return fmt.Errorf("required environment variable: %s", key)
-		}
+	if err := validateConfig(); err != nil {
+		return err
 	}
 	timeout, err := time.ParseDuration(env("BACKUP_TIMEOUT", "2h"))
 	if err != nil || timeout <= 0 {
@@ -65,17 +63,9 @@ func run(ctx context.Context) (result error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	log.Printf("backup started: mysql=%q port=%q databases=%q timeout=%s", os.Getenv("MYSQL_HOST"), env("MYSQL_PORT", "3306"), env("MYSQL_DATABASES", "ALL"), timeout)
-	endpoint := os.Getenv("S3_ENDPOINT")
-	secure := true
-	if strings.HasPrefix(endpoint, "http://") {
-		secure = false
-		endpoint = strings.TrimPrefix(endpoint, "http://")
-	} else {
-		endpoint = strings.TrimPrefix(endpoint, "https://")
-	}
-	client, err := minio.New(strings.TrimSuffix(endpoint, "/"), &minio.Options{Creds: credentials.NewStaticV4(os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), os.Getenv("AWS_SESSION_TOKEN")), Secure: secure, Region: env("AWS_REGION", "us-east-1"), BucketLookup: minio.BucketLookupPath})
+	client, err := newS3Client()
 	if err != nil {
-		return fmt.Errorf("S3 configuration: %w", err)
+		return err
 	}
 	databases, err := listDatabases(ctx)
 	if err != nil {
@@ -105,6 +95,84 @@ func run(ctx context.Context) (result error) {
 	}
 	log.Printf("backup summary: total=%d succeeded=%d failed=%d skipped=%d", len(databases), succeeded, failed, len(databases)-succeeded-failed)
 	return errors.Join(failures...)
+}
+
+func validateConfig() error {
+	for _, key := range []string{"MYSQL_HOST", "MYSQL_USER", "S3_ENDPOINT", "S3_BUCKET", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+		if os.Getenv(key) == "" {
+			return fmt.Errorf("required environment variable: %s", key)
+		}
+	}
+	if duration, err := time.ParseDuration(env("BACKUP_TIMEOUT", "2h")); err != nil || duration <= 0 {
+		return fmt.Errorf("invalid BACKUP_TIMEOUT")
+	}
+	return nil
+}
+
+func newS3Client() (*minio.Client, error) {
+	endpoint := os.Getenv("S3_ENDPOINT")
+	secure := true
+	if strings.HasPrefix(endpoint, "http://") {
+		secure = false
+		endpoint = strings.TrimPrefix(endpoint, "http://")
+	} else {
+		endpoint = strings.TrimPrefix(endpoint, "https://")
+	}
+	client, err := minio.New(strings.TrimSuffix(endpoint, "/"), &minio.Options{Creds: credentials.NewStaticV4(os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), os.Getenv("AWS_SESSION_TOKEN")), Secure: secure, Region: env("AWS_REGION", "us-east-1"), BucketLookup: minio.BucketLookupPath})
+	if err != nil {
+		return nil, fmt.Errorf("S3 configuration: %w", err)
+	}
+	return client, nil
+}
+
+func startupCheck(ctx context.Context) error {
+	if err := validateConfig(); err != nil {
+		return err
+	}
+	timeout, err := time.ParseDuration(env("STARTUP_CHECK_TIMEOUT", "30s"))
+	if err != nil || timeout <= 0 {
+		return fmt.Errorf("invalid STARTUP_CHECK_TIMEOUT")
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	started := time.Now()
+	log.Printf("startup check: MySQL login and SELECT 1 host=%q port=%q timeout=%s", os.Getenv("MYSQL_HOST"), env("MYSQL_PORT", "3306"), timeout)
+	args := append(connectionArgs(), "--batch", "--skip-column-names", "--execute=SELECT 1")
+	cmd := exec.CommandContext(ctx, env("MYSQL_BIN", "mysql"), args...)
+	cmd.Env = append(os.Environ(), "MYSQL_PWD="+os.Getenv("MYSQL_PASSWORD"))
+	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return fmt.Errorf("startup MySQL check interrupted: %w", ctx.Err())
+	}
+	if err != nil {
+		return fmt.Errorf("startup MySQL login/query failed: %w (check DNS, network, credentials and TLS)", err)
+	}
+	if strings.TrimSpace(string(output)) != "1" {
+		return fmt.Errorf("startup MySQL SELECT 1 returned unexpected response")
+	}
+	log.Printf("startup MySQL check passed: elapsed=%s", time.Since(started).Round(time.Millisecond))
+	client, err := newS3Client()
+	if err != nil {
+		return err
+	}
+	key := path.Join(env("S3_PREFIX", "mysql"), ".connection-checks", time.Now().UTC().Format("20060102T150405.000000000Z")+".txt")
+	log.Printf("startup check: S3 bucket upload destination=s3://%s/%s", os.Getenv("S3_BUCKET"), key)
+	payload := "mysql-s3-backup startup connection check\n"
+	if _, err := client.PutObject(ctx, os.Getenv("S3_BUCKET"), key, strings.NewReader(payload), int64(len(payload)), minio.PutObjectOptions{ContentType: "text/plain"}); err != nil {
+		return fmt.Errorf("startup S3 upload check failed: %w", err)
+	}
+	log.Print("startup S3 upload check passed: bucket exists and credentials permit writing probe object")
+	// Cleanup is best effort: backup accounts need not have delete permissions.
+	if err := client.RemoveObject(ctx, os.Getenv("S3_BUCKET"), key, minio.RemoveObjectOptions{}); err != nil {
+		log.Printf("WARNING startup probe cleanup failed: object=s3://%s/%s error=%v; remove it manually or use a lifecycle rule", os.Getenv("S3_BUCKET"), key, err)
+	} else {
+		log.Print("startup S3 probe cleanup passed")
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("startup check interrupted: %w", ctx.Err())
+	}
+	log.Printf("startup checks passed: elapsed=%s; ready to back up or enter schedule", time.Since(started).Round(time.Millisecond))
+	return nil
 }
 
 func connectionArgs() []string {
@@ -259,6 +327,9 @@ func main() {
 	log.Printf("service started: timezone=%s schedule=%q timeout=%q object_timestamps=UTC", location, os.Getenv("BACKUP_INTERVAL"), env("BACKUP_TIMEOUT", "2h"))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err := startupCheck(ctx); err != nil {
+		log.Fatalf("startup checks failed: %v", err)
+	}
 	if value := os.Getenv("BACKUP_INTERVAL"); value != "" {
 		interval, err := time.ParseDuration(value)
 		if err != nil {
