@@ -1,6 +1,6 @@
 # Docker / Kubernetes 部署
 
-这是单次备份任务，成功后容器退出（退出码 0）属于正常行为。没有 Web 页面、监听端口或常驻服务。以下命令在 Linux/Bash 执行，先进入仓库根目录。
+支持单次备份和内部定时备份。BACKUP_INTERVAL 留空时，备份一次后退出；设为 24h 等正时长时，启动立即备份，之后每次备份尝试结束等待该间隔再执行。没有 Web 页面或监听端口。以下命令在 Linux/Bash 执行，先进入仓库根目录。
 
 ## 1. 填写配置
 
@@ -59,55 +59,71 @@ docker compose run --rm backup
 0 2 * * * cd /opt/mysql-s3-backup && BACKUP_IMAGE=registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest /usr/bin/docker compose run --rm -T backup >> /var/log/mysql-s3-backup.log 2>&1
 ```
 
-## 4. Kubernetes 定时备份
+## 4. Kubernetes Deployment 常驻备份
 
-使用 Kubernetes 1.27+，配置文件 `deploy/k8s/cronjob.yaml` 默认北京时间每天 02:00 执行。其中 `image` 已配置为本仓库镜像，并固定到 CI 成功发布的 commit SHA 标签。示例仅支持 amd64 节点，与当前 CI 镜像一致。`/tmp` 默认 10Gi，请按压缩备份大小调整 sizeLimit、ephemeral-storage requests/limits 与节点磁盘空间。
+使用 `deploy/k8s/deployment.yaml`，无需 CronJob。程序启动立即备份一次，每次尝试结束后等待 `BACKUP_INTERVAL` 再执行，默认 `24h`。失败记录日志并等待下一次重试，同一个进程内不会重叠执行。Pod 重启会立即执行一次；这不是每天固定钟点调度。保持 `replicas: 1`，使用 Recreate 更新策略减少更新期间重复备份。
+
+先填写 `.env`（默认全部数据库），创建 namespace 和运行参数 Secret：
 
 ```sh
 kubectl create namespace backup --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n backup create secret generic mysql-s3-backup-env --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-私有镜像仓库：在本机先执行 `docker login registry.cn-hangzhou.aliyuncs.com`，若 Docker 配置文件直接包含该仓库 auths 凭据（而不是仅配置 credsStore），可创建拉取 Secret：
+私有镜像需要 `registry-credentials`。先执行 `docker login registry.cn-hangzhou.aliyuncs.com`。若本机 Docker 配置直接包含 auths 凭据（而非仅有 credsStore），执行：
 
 ```sh
 kubectl -n backup create secret generic registry-credentials --type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson="$HOME/.docker/config.json" --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-若 Docker 使用凭据助手，使用平台提供的镜像拉取 Secret 并修改 `imagePullSecrets` 的名称；公开镜像可删除 `imagePullSecrets`。
+使用凭据助手时请使用平台提供的镜像拉取 Secret 并修改 `imagePullSecrets`；公开镜像可删除该字段。
+
+等待本次代码的镜像 CI 发布成功，然后部署：
 
 ```sh
-kubectl apply --dry-run=server -f deploy/k8s/cronjob.yaml
-kubectl apply -f deploy/k8s/cronjob.yaml
-kubectl -n backup get cronjob mysql-s3-backup
+kubectl apply --dry-run=server -f deploy/k8s/deployment.yaml
+kubectl apply -f deploy/k8s/deployment.yaml
+kubectl -n backup rollout status deployment/mysql-s3-backup --timeout=180s
+kubectl -n backup logs -f deployment/mysql-s3-backup
 ```
 
-立即手动备份并查看日志：
+镜像默认 `registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest`，拉取策略 Always。生产环境可改为本次 CI 发布的固定 SHA 标签。当前镜像仅支持 amd64。临时空间默认 10Gi，按备份大小调整 emptyDir、ephemeral-storage 与节点容量。
+
+Deployment 显式设置 `BACKUP_INTERVAL=24h`，优先于 Secret 中的同名值。修改间隔：编辑 deployment.yaml 中的 value（如 `6h`、`12h`），再 apply；也可以直接执行：
 
 ```sh
-JOB="mysql-s3-backup-manual-$(date +%s)"
-kubectl -n backup create job "$JOB" --from=cronjob/mysql-s3-backup
-kubectl -n backup get pods -l job-name="$JOB" -w
-# Pod 启动后，在另一终端执行（JOB 替换为上一步实际名称）
-kubectl -n backup logs -f job/"$JOB"
-kubectl -n backup wait --for=condition=complete job/"$JOB" --timeout=7500s
+kubectl -n backup set env deployment/mysql-s3-backup BACKUP_INTERVAL=6h
 ```
 
-`concurrencyPolicy: Forbid` 避免同一个 CronJob 的定时任务重叠，但不限制手动创建的 Job；手动触发前确认没有正在运行的备份。
+更新数据库/S3 参数：修改 `.env` 后重新创建/更新 Secret，再重启 Deployment。重启后立即备份一次：
 
-修改配置：编辑 `.env`，重新执行创建/更新 `mysql-s3-backup-env` Secret 的命令，新 Job 会读取新值，正在运行的 Job 不变。修改时间或资源后重新 apply CronJob。暂停/恢复定时备份：
+```sh
+kubectl -n backup create secret generic mysql-s3-backup-env --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n backup rollout restart deployment/mysql-s3-backup
+```
+
+如果之前部署过 CronJob，先暂停它，等已有 Job 完成，再删除 CronJob 并启动 Deployment，避免两套任务同时执行：
 
 ```sh
 kubectl -n backup patch cronjob mysql-s3-backup --type=merge -p '{"spec":{"suspend":true}}'
-kubectl -n backup patch cronjob mysql-s3-backup --type=merge -p '{"spec":{"suspend":false}}'
+kubectl -n backup get jobs,pods
+# 确认旧备份已结束后执行
+kubectl -n backup delete cronjob mysql-s3-backup
+```
+
+暂停/恢复 Deployment（恢复后立即执行备份）：
+
+```sh
+kubectl -n backup scale deployment/mysql-s3-backup --replicas=0
+kubectl -n backup scale deployment/mysql-s3-backup --replicas=1
 ```
 
 失败排查：
 
 ```sh
-kubectl -n backup get jobs,pods
+kubectl -n backup get pods -l app=mysql-s3-backup
 kubectl -n backup describe pod <pod-name>
-kubectl -n backup logs <pod-name>
+kubectl -n backup logs -f deployment/mysql-s3-backup
 ```
 
-`ImagePullBackOff` 检查镜像地址和拉取 Secret；`mysqldump failed` 检查数据库网络、用户权限、密码与服务端兼容性；上传失败检查 S3 endpoint、密钥、桶名及桶权限。
+`ImagePullBackOff` 检查镜像地址和拉取 Secret；`mysqldump failed` 检查数据库网络、权限、密码与客户端兼容性；上传失败检查 S3 参数与桶权限。Pod Running 仅代表调度进程在运行，备份是否成功以 `backup uploaded` 日志及桶内文件为准。

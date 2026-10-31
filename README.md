@@ -1,10 +1,10 @@
 # mysql-s3-backup
 
-Go 编写的单次备份工具：调用 MySQL 8.4 `mysqldump`，gzip 压缩，成功后上传 S3 兼容存储（AWS S3、MinIO 等）。失败退出码为 1，不会将失败的 dump 上传为备份。临时文件自动清理，需要足够的临时磁盘空间。
+Go 编写的 MySQL 备份工具：调用 MySQL 8.4 `mysqldump`，gzip 压缩，成功后上传 S3 兼容存储（AWS S3、MinIO 等）。单次模式失败退出码为 1，不会将失败的 dump 上传为备份。临时文件自动清理，需要足够的临时磁盘空间。
 
 ## 运行
 
-Docker Compose 与 Kubernetes CronJob 的完整配置和操作命令见 [部署说明](deploy/README.md)。
+Docker Compose 与 Kubernetes Deployment 的完整配置和操作命令见 [部署说明](deploy/README.md)。
 
 复制 `.env.example` 为 `.env` 并修改连接信息，然后运行：
 
@@ -12,7 +12,7 @@ Docker Compose 与 Kubernetes CronJob 的完整配置和操作命令见 [部署�
 docker run --rm --env-file .env <registry>/<namespace>/mysql-s3-backup:latest
 ```
 
-每次运行备份一次，可通过 cron 或 Kubernetes CronJob 调度。`MYSQL_DATABASES` 用空格分隔，留空备份全部数据库。`S3_ENDPOINT` 支持 HTTPS（默认）或显式 HTTP，使用 path-style 寻址。支持 `AWS_SESSION_TOKEN` 临时凭据。`BACKUP_TIMEOUT` 默认 `2h`，覆盖 dump 和上传全过程。对象路径为 `S3_PREFIX/YYYY/MM/DD/<UTC时间>.sql.gz`，默认前缀 `mysql`。
+默认每次运行备份一次；设置 `BACKUP_INTERVAL=24h` 后常驻运行，启动立即备份，每次尝试结束后等待指定间隔再执行。定时模式失败会记录日志并继续调度，收到终止信号时停止。Kubernetes 使用单副本 Deployment，并显式设置 24h 间隔。`MYSQL_DATABASES` 用空格分隔，留空备份全部数据库。`S3_ENDPOINT` 支持 HTTPS（默认）或显式 HTTP，使用 path-style 寻址。支持 `AWS_SESSION_TOKEN` 临时凭据。`BACKUP_TIMEOUT` 默认 `2h`，覆盖 dump 和上传全过程。对象路径为 `S3_PREFIX/YYYY/MM/DD/<UTC时间>.sql.gz`，默认前缀 `mysql`。
 
 `MYSQL_USER` 需要选定数据库的读取、视图、触发器、例程与事件等相关备份权限。`--single-transaction` 用于 InnoDB 一致性备份；备份期间避免 DDL，非事务表需另行安排锁定。镜像自带 MySQL 8.4 客户端；其他服务端版本应先验证客户端兼容性。
 

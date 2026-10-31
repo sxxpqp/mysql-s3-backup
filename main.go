@@ -95,9 +95,34 @@ func run(ctx context.Context) error {
 	return nil
 }
 
+// Wait after each attempt so slow backups never overlap in this process.
+func runScheduled(ctx context.Context, interval time.Duration, backup func(context.Context) error) {
+	for ctx.Err() == nil {
+		if err := backup(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("backup failed; retry after %s: %v", interval, err)
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if value := os.Getenv("BACKUP_INTERVAL"); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil || interval <= 0 {
+			log.Fatal("BACKUP_INTERVAL must be a positive duration, e.g. 24h")
+		}
+		log.Printf("scheduled backup enabled: immediate first backup, then %s after each attempt", interval)
+		runScheduled(ctx, interval, run)
+		return
+	}
 	if err := run(ctx); err != nil {
 		log.Print(err)
 		os.Exit(1)

@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-s3-backup
+  namespace: backup
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mysql-s3-backup
+  template:
+    metadata:
+      labels:
+        app: mysql-s3-backup
+    spec:
+      terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      imagePullSecrets:
+        - name: registry-credentials
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backup
+          image: registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest
+          imagePullPolicy: Always
+          envFrom:
+            - secretRef:
+                name: mysql-s3-backup-env
+          env:
+            - name: BACKUP_INTERVAL
+              value: "24h"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+              ephemeral-storage: 12Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 10Gi

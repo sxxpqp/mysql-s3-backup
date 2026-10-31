@@ -3,6 +3,7 @@ package main
 import (
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestMain(m *testing.M) {
@@ -22,6 +24,24 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestScheduledBackupContinuesAfterFailureAndStops(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	calls := 0
+	runScheduled(ctx, time.Millisecond, func(context.Context) error {
+		calls++
+		if calls == 2 {
+			cancel()
+		}
+		return errors.New("upload unavailable")
+	})
+	if calls != 2 {
+		t.Fatalf("expected retry after failure, got %d calls", calls)
+	}
+	// A cancelled scheduler must not start another backup.
+	runScheduled(ctx, time.Millisecond, func(context.Context) error { t.Fatal("backup started after cancellation"); return nil })
 }
 
 func TestBackup(t *testing.T) {
