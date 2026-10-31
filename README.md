@@ -4,6 +4,8 @@ Go 编写的单次备份工具：调用 MySQL 8.4 `mysqldump`，gzip 压缩，�
 
 ## 运行
 
+Docker Compose 与 Kubernetes CronJob 的完整配置和操作命令见 [部署说明](deploy/README.md)。
+
 复制 `.env.example` 为 `.env` 并修改连接信息，然后运行：
 
 ```sh

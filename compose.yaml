@@ -1,0 +1,15 @@
+services:
+  backup:
+    image: ${BACKUP_IMAGE:?Set BACKUP_IMAGE to your registry/namespace/mysql-s3-backup:tag}
+    env_file:
+      - path: .env
+        format: raw
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    volumes:
+      - backup-tmp:/tmp
+volumes:
+  backup-tmp:
