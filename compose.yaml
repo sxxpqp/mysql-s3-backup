@@ -1,6 +1,6 @@
 services:
   backup:
-    image: ${BACKUP_IMAGE:?Set BACKUP_IMAGE to your registry/namespace/mysql-s3-backup:tag}
+    image: ${BACKUP_IMAGE:-registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest}
     env_file:
       - path: .env
         format: raw

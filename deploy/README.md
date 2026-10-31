@@ -31,11 +31,11 @@ BACKUP_TIMEOUT=2h
 
 ## 2. Docker 单次备份
 
-镜像地址取 CI 使用的 `ALIYUN_REGISTRY/ALIYUN_NAME_SPACE/mysql-s3-backup:latest`。下面替换为自己的实际地址，私有仓库先交互登录：
+镜像地址为 `registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest`。私有仓库先交互登录：
 
 ```sh
-docker login <registry>
-export BACKUP_IMAGE='<registry>/<namespace>/mysql-s3-backup:latest'
+docker login registry.cn-hangzhou.aliyuncs.com
+export BACKUP_IMAGE='registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest'
 docker pull "$BACKUP_IMAGE"
 docker run --rm --env-file .env "$BACKUP_IMAGE"
 echo $?
@@ -45,7 +45,7 @@ echo $?
 
 ## 3. Docker Compose
 
-需要 Docker Compose 2.30+（使用 raw env_file 保留密码中的 `$` 等字符）。沿用上面的 `.env` 与 `BACKUP_IMAGE`：
+需要 Docker Compose 2.30+（使用 raw env_file 保留密码中的 `$` 等字符）。沿用上面的 `.env`，Compose 默认使用上述镜像，可通过 `BACKUP_IMAGE` 覆盖：
 
 ```sh
 docker compose pull
@@ -55,19 +55,19 @@ docker compose run --rm backup
 配置文件为根目录 `compose.yaml`，临时数据卷挂载 `/tmp`，备份成功或失败都会清理本次临时文件。修改 `.env` 后重新执行上述 run 命令即生效。需要定时执行时，由宿主机 cron 调度；例如 `crontab -e` 添加以下一行（修改目录及镜像地址；时间遵循宿主机时区）：
 
 ```cron
-0 2 * * * cd /opt/mysql-s3-backup && BACKUP_IMAGE=<registry>/<namespace>/mysql-s3-backup:latest /usr/bin/docker compose run --rm -T backup >> /var/log/mysql-s3-backup.log 2>&1
+0 2 * * * cd /opt/mysql-s3-backup && BACKUP_IMAGE=registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest /usr/bin/docker compose run --rm -T backup >> /var/log/mysql-s3-backup.log 2>&1
 ```
 
 ## 4. Kubernetes 定时备份
 
-使用 Kubernetes 1.27+，配置文件 `deploy/k8s/cronjob.yaml` 默认北京时间每天 02:00 执行。先将其中 `image` 改为自己的镜像地址，建议使用 CI 成功发布的固定 commit SHA 标签。示例仅支持 amd64 节点，与当前 CI 镜像一致。`/tmp` 默认 10Gi，请按压缩备份大小调整 sizeLimit、ephemeral-storage requests/limits 与节点磁盘空间。
+使用 Kubernetes 1.27+，配置文件 `deploy/k8s/cronjob.yaml` 默认北京时间每天 02:00 执行。其中 `image` 已配置为本仓库镜像，并固定到 CI 成功发布的 commit SHA 标签。示例仅支持 amd64 节点，与当前 CI 镜像一致。`/tmp` 默认 10Gi，请按压缩备份大小调整 sizeLimit、ephemeral-storage requests/limits 与节点磁盘空间。
 
 ```sh
 kubectl create namespace backup --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n backup create secret generic mysql-s3-backup-env --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-私有镜像仓库：在本机先执行 `docker login <registry>`，若 Docker 配置文件直接包含该仓库 auths 凭据（而不是仅配置 credsStore），可创建拉取 Secret：
+私有镜像仓库：在本机先执行 `docker login registry.cn-hangzhou.aliyuncs.com`，若 Docker 配置文件直接包含该仓库 auths 凭据（而不是仅配置 credsStore），可创建拉取 Secret：
 
 ```sh
 kubectl -n backup create secret generic registry-credentials --type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson="$HOME/.docker/config.json" --dry-run=client -o yaml | kubectl apply -f -

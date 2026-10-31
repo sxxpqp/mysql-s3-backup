@@ -34,8 +34,8 @@ spec:
               type: RuntimeDefault
           containers:
             - name: backup
-              # Replace with the same image used by Docker. Prefer a fixed commit tag.
-              image: registry.example.com/namespace/mysql-s3-backup:76c89e07ac3c3d39435bca1fb565569e1f274074
+              # Fixed commit tag from a successful CI image build.
+              image: registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:76c89e07ac3c3d39435bca1fb565569e1f274074
               imagePullPolicy: IfNotPresent
               envFrom:
                 - secretRef:
