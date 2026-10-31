@@ -37,7 +37,9 @@ spec:
                 name: mysql-s3-backup-env
           env:
             - name: BACKUP_INTERVAL
-              value: "24h"
+              value: "0 2 * * *"
+            - name: BACKUP_TIMEZONE
+              value: "Asia/Shanghai"
           resources:
             requests:
               cpu: 100m

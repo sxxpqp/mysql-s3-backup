@@ -44,6 +44,32 @@ func TestScheduledBackupContinuesAfterFailureAndStops(t *testing.T) {
 	runScheduled(ctx, time.Millisecond, func(context.Context) error { t.Fatal("backup started after cancellation"); return nil })
 }
 
+func TestCronSchedule(t *testing.T) {
+	schedule, loc, err := parseCron("0 2 * * *", "Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := time.Date(2026, 10, 31, 1, 59, 0, 0, loc)
+	want := time.Date(2026, 10, 31, 2, 0, 0, 0, loc)
+	if got := schedule.Next(before); !got.Equal(want) {
+		t.Fatalf("got %s want %s", got, want)
+	}
+	if got := schedule.Next(want); !got.Equal(want.AddDate(0, 0, 1)) {
+		t.Fatalf("must wait for next day at exact tick: %s", got)
+	}
+	for _, value := range []string{"invalid", "60 2 * * *", "0 0 0 * * *", "0 0 31 2 *"} {
+		if _, _, err := parseCron(value, "Asia/Shanghai"); err == nil {
+			t.Errorf("accepted invalid schedule %q", value)
+		}
+	}
+	if _, _, err := parseCron("0 2 * * *", "invalid/zone"); err == nil {
+		t.Fatal("accepted invalid timezone")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runCron(ctx, schedule, loc, func(context.Context) error { t.Fatal("ran after cancel"); return nil })
+}
+
 func TestBackup(t *testing.T) {
 	for _, mode := range []string{"ok", "fail"} {
 		t.Run(mode, func(t *testing.T) {

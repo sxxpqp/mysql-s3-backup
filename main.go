@@ -12,9 +12,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/robfig/cron/v3"
 )
 
 func env(key, fallback string) string {
@@ -111,13 +113,62 @@ func runScheduled(ctx context.Context, interval time.Duration, backup func(conte
 	}
 }
 
+func parseCron(value, zone string) (cron.Schedule, *time.Location, error) {
+	location, err := time.LoadLocation(zone)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid BACKUP_TIMEZONE: %w", err)
+	}
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	schedule, err := parser.Parse(value)
+	if err != nil {
+		return nil, nil, fmt.Errorf("BACKUP_INTERVAL must be a five-field cron expression or positive duration: %w", err)
+	}
+	if schedule.Next(time.Now().In(location)).IsZero() {
+		return nil, nil, fmt.Errorf("BACKUP_INTERVAL has no upcoming execution")
+	}
+	return schedule, location, nil
+}
+
+func runCron(ctx context.Context, schedule cron.Schedule, location *time.Location, backup func(context.Context) error) {
+	for ctx.Err() == nil {
+		next := schedule.Next(time.Now().In(location))
+		if next.IsZero() {
+			log.Print("cron schedule has no upcoming execution")
+			return
+		}
+		log.Printf("next backup: %s", next.Format(time.RFC3339))
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if err := backup(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("backup failed; retry at next scheduled time: %v", err)
+		}
+		// Compute the next future time after completion; missed ticks are skipped.
+	}
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if value := os.Getenv("BACKUP_INTERVAL"); value != "" {
 		interval, err := time.ParseDuration(value)
-		if err != nil || interval <= 0 {
-			log.Fatal("BACKUP_INTERVAL must be a positive duration, e.g. 24h")
+		if err != nil {
+			schedule, location, err := parseCron(value, env("BACKUP_TIMEZONE", "Asia/Shanghai"))
+			if err != nil {
+				log.Fatal(err)
+			}
+			runCron(ctx, schedule, location, run)
+			return
+		}
+		if interval <= 0 {
+			log.Fatal("BACKUP_INTERVAL duration must be positive")
 		}
 		log.Printf("scheduled backup enabled: immediate first backup, then %s after each attempt", interval)
 		runScheduled(ctx, interval, run)

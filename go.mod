@@ -2,7 +2,10 @@ module github.com/sxxpqp/mysql-s3-backup
 
 go 1.26.0
 
-require github.com/minio/minio-go/v7 v7.4.1
+require (
+	github.com/minio/minio-go/v7 v7.4.1
+	github.com/robfig/cron/v3 v3.0.1
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

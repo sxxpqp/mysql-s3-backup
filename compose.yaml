@@ -4,7 +4,7 @@ services:
     env_file:
       - path: .env
         format: raw
-    restart: "no"
+    restart: unless-stopped
     read_only: true
     security_opt:
       - no-new-privileges:true

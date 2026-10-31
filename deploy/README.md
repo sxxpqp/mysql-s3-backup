@@ -1,6 +1,6 @@
 # Docker / Kubernetes 部署
 
-支持单次备份和内部定时备份。BACKUP_INTERVAL 留空时，备份一次后退出；设为 24h 等正时长时，启动立即备份，之后每次备份尝试结束等待该间隔再执行。没有 Web 页面或监听端口。以下命令在 Linux/Bash 执行，先进入仓库根目录。
+支持单次备份和 cron 定时备份。BACKUP_INTERVAL 留空时备份一次；默认 0 2 * * * 表示每天北京时间 02:00 执行，启动等待下一次计划时间。BACKUP_TIMEOUT=2h 是单次备份超时，与调度时间独立。没有 Web 页面或监听端口。以下命令在 Linux/Bash 执行，先进入仓库根目录。
 
 ## 1. 填写配置
 
@@ -26,6 +26,8 @@ AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=replace-me
 AWS_SECRET_ACCESS_KEY=replace-me
 BACKUP_TIMEOUT=2h
+BACKUP_INTERVAL=0 2 * * *
+BACKUP_TIMEZONE=Asia/Shanghai
 ```
 
 `MYSQL_DATABASES` 留空代表全部数据库。MySQL/S3 必须能从容器或 Pod 网络访问；容器内 `127.0.0.1` 指向容器自身。Kubernetes 跨 namespace 数据库可用 `mysql.database.svc.cluster.local`。`.env` 包含运行凭据，不要提交 Git；GitHub 的 `ALIYUN_*` 仅用于构建镜像，不能代替这些参数。
@@ -38,7 +40,7 @@ BACKUP_TIMEOUT=2h
 docker login registry.cn-hangzhou.aliyuncs.com
 export BACKUP_IMAGE='registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest'
 docker pull "$BACKUP_IMAGE"
-docker run --rm --env-file .env "$BACKUP_IMAGE"
+docker run --rm --env-file .env -e BACKUP_INTERVAL= "$BACKUP_IMAGE"
 echo $?
 ```
 
@@ -50,18 +52,30 @@ echo $?
 
 ```sh
 docker compose pull
-docker compose run --rm backup
+docker compose up -d
+docker compose logs -f backup
 ```
 
-配置文件为根目录 `compose.yaml`，临时数据卷挂载 `/tmp`，备份成功或失败都会清理本次临时文件。修改 `.env` 后重新执行上述 run 命令即生效。需要定时执行时，由宿主机 cron 调度；例如 `crontab -e` 添加以下一行（修改目录及镜像地址；时间遵循宿主机时区）：
+配置文件为根目录 `compose.yaml`。默认 restart 为 unless-stopped，程序内部按标准五字段 cron 调度，不需要宿主机 crontab。`.env` 中表达式不加引号：
 
-```cron
-0 2 * * * cd /opt/mysql-s3-backup && BACKUP_IMAGE=registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest /usr/bin/docker compose run --rm -T backup >> /var/log/mysql-s3-backup.log 2>&1
+```dotenv
+BACKUP_TIMEOUT=2h
+BACKUP_INTERVAL=0 2 * * *
+BACKUP_TIMEZONE=Asia/Shanghai
 ```
+
+- `0 2 * * *`：每天 02:00。
+- `0 */6 * * *`：每天 00:00、06:00、12:00、18:00。
+- `*/30 * * * *`：每半小时。
+- `0 2 * * 1`：每周一 02:00。
+
+启动后日志会打印下一次执行时间。备份串行执行，耗时跨过的计划点会跳过；失败后等待下一个计划点，不补跑。默认北京时间，S3 文件名仍使用 UTC。兼容旧的 `24h` 时长格式，旧格式会启动立即备份，之后按完成时间计算间隔。
+
+修改 `.env` 后执行 `docker compose up -d --force-recreate`。立即手动备份：`docker compose run --rm -e BACKUP_INTERVAL= backup`。停止定时容器：`docker compose down`。临时文件使用挂载到 /tmp 的数据卷，需要足够磁盘空间。
 
 ## 4. Kubernetes Deployment 常驻备份
 
-使用 `deploy/k8s/deployment.yaml`，无需 CronJob。程序启动立即备份一次，每次尝试结束后等待 `BACKUP_INTERVAL` 再执行，默认 `24h`。失败记录日志并等待下一次重试，同一个进程内不会重叠执行。Pod 重启会立即执行一次；这不是每天固定钟点调度。保持 `replicas: 1`，使用 Recreate 更新策略减少更新期间重复备份。
+使用 `deploy/k8s/deployment.yaml`，无需 CronJob。默认 `BACKUP_INTERVAL=0 2 * * *`，`BACKUP_TIMEZONE=Asia/Shanghai`，每天北京时间 02:00 执行。程序启动或 Pod 重启后等待下一个计划点，不立即备份。失败记录日志并等待下一计划点，同一个进程内不会重叠执行。保持 `replicas: 1`，使用 Recreate 更新策略减少更新期间重复备份。
 
 先填写 `.env`（默认全部数据库），创建 namespace 和运行参数 Secret：
 
@@ -89,13 +103,13 @@ kubectl -n backup logs -f deployment/mysql-s3-backup
 
 镜像默认 `registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest`，拉取策略 Always。生产环境可改为本次 CI 发布的固定 SHA 标签。当前镜像仅支持 amd64。临时空间默认 10Gi，按备份大小调整 emptyDir、ephemeral-storage 与节点容量。
 
-Deployment 显式设置 `BACKUP_INTERVAL=24h`，优先于 Secret 中的同名值。修改间隔：编辑 deployment.yaml 中的 value（如 `6h`、`12h`），再 apply；也可以直接执行：
+Deployment 显式设置 BACKUP_INTERVAL 和 BACKUP_TIMEZONE，优先于 Secret 同名值。修改计划：编辑 deployment.yaml 中的 value 再 apply，或执行：
 
 ```sh
-kubectl -n backup set env deployment/mysql-s3-backup BACKUP_INTERVAL=6h
+kubectl -n backup set env deployment/mysql-s3-backup BACKUP_INTERVAL='0 */6 * * *'
 ```
 
-更新数据库/S3 参数：修改 `.env` 后重新创建/更新 Secret，再重启 Deployment。重启后立即备份一次：
+更新数据库/S3 参数：修改 `.env` 后重新创建/更新 Secret，再重启 Deployment。重启后会打印新的下次执行时间：
 
 ```sh
 kubectl -n backup create secret generic mysql-s3-backup-env --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
@@ -111,7 +125,7 @@ kubectl -n backup get jobs,pods
 kubectl -n backup delete cronjob mysql-s3-backup
 ```
 
-暂停/恢复 Deployment（恢复后立即执行备份）：
+暂停/恢复 Deployment（恢复后等待下一个计划时间）：
 
 ```sh
 kubectl -n backup scale deployment/mysql-s3-backup --replicas=0
