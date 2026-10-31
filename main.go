@@ -3,9 +3,12 @@ package main
 import (
 	"compress/gzip"
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -74,6 +77,76 @@ func run(ctx context.Context) (result error) {
 	if err != nil {
 		return fmt.Errorf("S3 configuration: %w", err)
 	}
+	databases, err := listDatabases(ctx)
+	if err != nil {
+		return err
+	}
+	if len(databases) == 0 {
+		return fmt.Errorf("no databases available for backup")
+	}
+	log.Printf("database list: count=%d names=%q", len(databases), databases)
+	var failures []error
+	succeeded := 0
+	failed := 0
+	stamp := started.UTC().Format("2006/01/02/20060102T150405.000000000Z")
+	for i, database := range databases {
+		if ctx.Err() != nil {
+			failures = append(failures, ctx.Err())
+			break
+		}
+		log.Printf("database backup started: database=%q progress=%d/%d", database, i+1, len(databases))
+		if err := backupDatabase(ctx, client, database, stamp); err != nil {
+			failed++
+			log.Printf("database backup failed: database=%q error=%v", database, err)
+			failures = append(failures, fmt.Errorf("database %q: %w", database, err))
+		} else {
+			succeeded++
+		}
+	}
+	log.Printf("backup summary: total=%d succeeded=%d failed=%d skipped=%d", len(databases), succeeded, failed, len(databases)-succeeded-failed)
+	return errors.Join(failures...)
+}
+
+func connectionArgs() []string {
+	return []string{"--protocol=TCP", "--host=" + os.Getenv("MYSQL_HOST"), "--port=" + env("MYSQL_PORT", "3306"), "--user=" + os.Getenv("MYSQL_USER")}
+}
+
+func listDatabases(ctx context.Context) ([]string, error) {
+	databases := strings.Fields(os.Getenv("MYSQL_DATABASES"))
+	if len(databases) == 0 {
+		log.Print("discovering databases: excluding virtual schemas information_schema, performance_schema, sys; including mysql")
+		// Hex encoding preserves database names containing whitespace or newlines.
+		args := append(connectionArgs(), "--batch", "--skip-column-names", "--raw", "--execute=SELECT HEX(SCHEMA_NAME) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','sys') ORDER BY SCHEMA_NAME")
+		cmd := exec.CommandContext(ctx, env("MYSQL_BIN", "mysql"), args...)
+		cmd.Env = append(os.Environ(), "MYSQL_PWD="+os.Getenv("MYSQL_PASSWORD"))
+		output, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("list databases failed: %w", err)
+		}
+		for _, line := range strings.Fields(string(output)) {
+			name, err := hex.DecodeString(line)
+			if err != nil {
+				return nil, fmt.Errorf("invalid database list response: %w", err)
+			}
+			databases = append(databases, string(name))
+		}
+	}
+	seen := make(map[string]bool)
+	unique := make([]string, 0, len(databases))
+	for _, database := range databases {
+		if database == "" || strings.HasPrefix(database, "-") || strings.ContainsRune(database, 0) {
+			return nil, fmt.Errorf("invalid database name %q", database)
+		}
+		if !seen[database] {
+			unique = append(unique, database)
+			seen[database] = true
+		}
+	}
+	return unique, nil
+}
+
+func backupDatabase(ctx context.Context, client *minio.Client, database, stamp string) error {
+	started := time.Now()
 	// Only upload a complete, successful dump. Temporary backup is removed on every exit.
 	file, err := os.CreateTemp("", "mysql-backup-*.sql.gz")
 	if err != nil {
@@ -81,24 +154,13 @@ func run(ctx context.Context) (result error) {
 	}
 	defer os.Remove(file.Name())
 	defer file.Close()
-	args := []string{"--host=" + os.Getenv("MYSQL_HOST"), "--port=" + env("MYSQL_PORT", "3306"), "--user=" + os.Getenv("MYSQL_USER"), "--single-transaction", "--quick", "--routines", "--events", "--triggers", "--hex-blob", "--no-tablespaces", "--set-gtid-purged=OFF"}
-	if databases := strings.Fields(os.Getenv("MYSQL_DATABASES")); len(databases) > 0 {
-		for _, db := range databases {
-			if strings.HasPrefix(db, "-") {
-				return fmt.Errorf("invalid database name")
-			}
-		}
-		args = append(args, "--databases")
-		args = append(args, databases...)
-	} else {
-		args = append(args, "--all-databases")
-	}
+	args := append(connectionArgs(), "--single-transaction", "--quick", "--routines", "--events", "--triggers", "--hex-blob", "--no-tablespaces", "--set-gtid-purged=OFF", "--databases", database)
 	cmd := exec.CommandContext(ctx, env("MYSQLDUMP_BIN", "mysqldump"), args...)
 	cmd.Env = append(os.Environ(), "MYSQL_PWD="+os.Getenv("MYSQL_PASSWORD"))
 	gz := gzip.NewWriter(file)
 	cmd.Stdout = gz
 	dumpStarted := time.Now()
-	log.Print("dump started: mysqldump + gzip")
+	log.Printf("dump started: database=%q mysqldump + gzip", database)
 	// Do not echo client stderr: it may contain credentials or database content.
 	if err := cmd.Run(); err != nil {
 		_ = gz.Close()
@@ -117,8 +179,8 @@ func run(ctx context.Context) (result error) {
 	if _, err = file.Seek(0, 0); err != nil {
 		return err
 	}
-	log.Printf("dump completed: elapsed=%s compressed_bytes=%d compressed_mib=%.2f", time.Since(dumpStarted).Round(time.Millisecond), size, float64(size)/(1024*1024))
-	key := path.Join(env("S3_PREFIX", "mysql"), time.Now().UTC().Format("2006/01/02/20060102T150405.000000000Z")+".sql.gz")
+	log.Printf("dump completed: database=%q elapsed=%s compressed_bytes=%d compressed_mib=%.2f", database, time.Since(dumpStarted).Round(time.Millisecond), size, float64(size)/(1024*1024))
+	key := path.Join(env("S3_PREFIX", "mysql"), url.PathEscape(database), stamp+".sql.gz")
 	uploadStarted := time.Now()
 	log.Printf("upload started: destination=s3://%s/%s bytes=%d", os.Getenv("S3_BUCKET"), key, size)
 	_, err = client.PutObject(ctx, os.Getenv("S3_BUCKET"), key, file, size, minio.PutObjectOptions{ContentType: "application/gzip"})
@@ -126,6 +188,7 @@ func run(ctx context.Context) (result error) {
 		return fmt.Errorf("upload backup: %w", err)
 	}
 	log.Printf("backup uploaded: s3://%s/%s (%d bytes) upload_elapsed=%s", os.Getenv("S3_BUCKET"), key, size, time.Since(uploadStarted).Round(time.Millisecond))
+	log.Printf("database backup completed: database=%q elapsed=%s", database, time.Since(started).Round(time.Millisecond))
 	return nil
 }
 

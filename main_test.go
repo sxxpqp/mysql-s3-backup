@@ -5,12 +5,14 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -41,10 +43,20 @@ func TestLogTimezone(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	if mode := os.Getenv("FAKE_DUMP"); mode != "" {
-		if mode == "fail" {
+		for _, arg := range os.Args[1:] {
+			if strings.HasPrefix(arg, "--execute=") {
+				fmt.Print("61707031\n61707032\n6d7973716c\n")
+				os.Exit(0)
+			}
+		}
+		database := os.Args[len(os.Args)-1]
+		if len(os.Args) < 3 || os.Args[len(os.Args)-2] != "--databases" {
+			os.Exit(3)
+		}
+		if mode == "fail" || (mode == "partial" && database == "app2") {
 			os.Exit(2)
 		}
-		_, _ = os.Stdout.WriteString("CREATE DATABASE example;\n")
+		fmt.Printf("CREATE DATABASE %s;\n", database)
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
@@ -95,9 +107,10 @@ func TestCronSchedule(t *testing.T) {
 }
 
 func TestBackup(t *testing.T) {
-	for _, mode := range []string{"ok", "fail"} {
+	for _, mode := range []string{"ok", "fail", "partial", "discover"} {
 		t.Run(mode, func(t *testing.T) {
 			var uploads atomic.Int32
+			var uploaded sync.Map
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != "PUT" || !strings.HasPrefix(r.URL.Path, "/backups/mysql/") {
 					t.Errorf("unexpected request %s %s", r.Method, r.URL)
@@ -115,11 +128,15 @@ func TestBackup(t *testing.T) {
 					return
 				}
 				defer reader.Close()
+				database := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")[2]
 				data, err := io.ReadAll(reader)
-				if err != nil || string(data) != "CREATE DATABASE example;\n" {
+				if err != nil || string(data) != "CREATE DATABASE "+database+";\n" {
 					t.Errorf("bad dump: %q %v", data, err)
 				}
 				uploads.Add(1)
+				if _, exists := uploaded.LoadOrStore(database, true); exists {
+					t.Errorf("duplicate upload for %s", database)
+				}
 				w.Header().Set("ETag", `"test"`)
 				w.WriteHeader(200)
 			}))
@@ -128,23 +145,43 @@ func TestBackup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for k, v := range map[string]string{"MYSQL_HOST": "localhost", "MYSQL_USER": "backup", "S3_ENDPOINT": server.URL, "S3_BUCKET": "backups", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "testsecret", "MYSQLDUMP_BIN": exe, "FAKE_DUMP": mode, "MYSQL_DATABASES": "app", "S3_PREFIX": "mysql"} {
+			for k, v := range map[string]string{"MYSQL_HOST": "localhost", "MYSQL_USER": "backup", "S3_ENDPOINT": server.URL, "S3_BUCKET": "backups", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "testsecret", "MYSQLDUMP_BIN": exe, "MYSQL_BIN": exe, "FAKE_DUMP": mode, "MYSQL_DATABASES": "app1 app2 app3 app1", "S3_PREFIX": "mysql"} {
 				t.Setenv(k, v)
 			}
+			if mode == "discover" {
+				t.Setenv("MYSQL_DATABASES", "")
+			}
 			err = run(context.Background())
-			if mode == "ok" {
+			if mode == "ok" || mode == "discover" {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if uploads.Load() != 1 {
-					t.Fatal("expected one upload")
+				if uploads.Load() != 3 {
+					t.Fatal("expected three separate database uploads")
+				}
+				if mode == "discover" {
+					if _, ok := uploaded.Load("mysql"); !ok {
+						t.Fatal("mysql schema not backed up")
+					}
 				}
 			} else {
 				if err == nil {
 					t.Fatal("expected dump error")
 				}
-				if uploads.Load() != 0 {
-					t.Fatal("failed dump was uploaded")
+				want := int32(0)
+				if mode == "partial" {
+					want = 2
+				}
+				if uploads.Load() != want {
+					t.Fatalf("expected %d successful database uploads, got %d", want, uploads.Load())
+				}
+				if mode == "partial" {
+					if _, ok := uploaded.Load("app2"); ok {
+						t.Fatal("failed dump was uploaded")
+					}
+					if _, ok := uploaded.Load("app3"); !ok {
+						t.Fatal("did not continue after database failure")
+					}
 				}
 			}
 		})

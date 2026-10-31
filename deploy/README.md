@@ -21,7 +21,7 @@ MYSQL_PORT=3306
 MYSQL_USER=backup
 # 数据库密码：替换为真实值 / MySQL password; replace with your actual value
 MYSQL_PASSWORD=replace-me
-# 留空备份全部数据库；多个库用空格分隔 / Empty = all databases; separate selected names with spaces
+# 留空自动发现全部可见库（含 mysql，跳过系统视图库），每库独立文件；多个库用空格分隔 / Empty = discover visible databases, including mysql, excluding virtual schemas; one file per database
 MYSQL_DATABASES=
 
 # S3 服务地址：包含 http:// 或 https://，不包含桶名和路径 / S3 endpoint URL, without bucket or object prefix
@@ -29,7 +29,7 @@ S3_ENDPOINT=https://s3.amazonaws.com
 # 存储桶名称：需提前创建，例如 rook / Existing bucket name, e.g. rook
 S3_BUCKET=rook
 # 桶内路径前缀：类似文件夹，不是另一个桶；默认 mysql / Object key prefix inside the bucket, like a folder; default mysql
-# 示例路径 / Example: s3://rook/mysql/YYYY/MM/DD/<UTC timestamp>.sql.gz
+# 示例路径 / Example: s3://rook/mysql/<database>/YYYY/MM/DD/<UTC timestamp>.sql.gz
 S3_PREFIX=mysql
 # S3 区域：按服务商配置 / S3 region configured by your provider
 AWS_REGION=us-east-1
@@ -40,7 +40,7 @@ AWS_SECRET_ACCESS_KEY=replace-me
 # 临时凭据令牌：仅使用 STS 临时凭据时启用 / Optional session token for temporary STS credentials
 # AWS_SESSION_TOKEN=replace-me
 
-# 单次备份超时：包含 dump、压缩和上传 / Per-backup timeout, including dump, compression and upload
+# 整轮备份超时：所有库的发现、dump、压缩、上传共用此时限 / Whole backup round timeout shared by discovery and all database dumps/uploads
 BACKUP_TIMEOUT=2h
 # 五字段 cron：分 时 日 月 周；每天 02:00；留空仅运行一次 / Five-field cron: minute hour day month weekday; empty = run once
 # 其他示例 / More examples: */30 * * * * = every 30 minutes; 0 */6 * * * = at 00:00, 06:00, 12:00, 18:00
@@ -170,3 +170,16 @@ Log timestamps and scheduled execution times both use BACKUP_TIMEZONE, including
 每次备份打印开始、数据库范围、超时、dump/压缩开始与耗时、压缩文件字节数和 MiB、上传目标与耗时、整体结果与总耗时，以及下次备份时间和等待时长。不打印数据库密码、S3 密钥或 SQL 内容。日志按阶段输出，大型 dump 运行期间不持续打印百分比。
 
 Each backup logs the start, database scope, timeout, dump/compression duration, compressed size, upload destination and duration, total result and elapsed time, plus the next scheduled run. Credentials and SQL contents are not logged; progress is reported by stage, not as a continuous percentage.
+
+## 逐库备份 / One file per database
+
+MYSQL_DATABASES 留空时，使用 mysql 客户端自动查询当前账号可见的库，包括 mysql，跳过 information_schema、performance_schema、sys；需要账号有查看和备份相关库的权限。填写 `app1 app2` 则只备份指定库，每个库单独 mysqldump、gzip 并上传。每个文件包含该库的 CREATE DATABASE、USE 和数据，可单独恢复。不会将多个库合并到一个 SQL 文件。
+
+With MYSQL_DATABASES empty, discover visible databases (including mysql, excluding virtual schemas); otherwise back up the space-separated selection. Each database gets a separate compressed SQL object. One database failure does not stop the remaining databases; the round fails if any database fails. BACKUP_TIMEOUT limits the entire round, not each database separately.
+
+路径示例 / Example object paths:
+
+- s3://rook/mysql/app1/2026/10/31/<round UTC timestamp>.sql.gz
+- s3://rook/mysql/app2/2026/10/31/<round UTC timestamp>.sql.gz
+
+每轮按库串行执行并及时删除该库临时文件。日志显示库名、进度、各库结果，以及总数、成功、失败、跳过数量。各库快照时间不同，不保证跨库同一时点一致性。不要对正在执行的定时任务再同时手动触发备份。
