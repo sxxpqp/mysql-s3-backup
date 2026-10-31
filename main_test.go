@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -14,6 +15,29 @@ import (
 	"testing"
 	"time"
 )
+
+func TestLogTimezone(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	w := timezoneLogWriter{output: &output, location: location}
+	message := []byte("backup completed\n")
+	n, err := w.Write(message)
+	if err != nil || n != len(message) {
+		t.Fatalf("write: %d %v", n, err)
+	}
+	parts := strings.SplitN(output.String(), " ", 2)
+	stamp, err := time.Parse(time.RFC3339, parts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, offset := stamp.Zone()
+	if offset != 8*60*60 || parts[1] != string(message) {
+		t.Fatalf("unexpected log: %s", output.String())
+	}
+}
 
 func TestMain(m *testing.M) {
 	if mode := os.Getenv("FAKE_DUMP"); mode != "" {

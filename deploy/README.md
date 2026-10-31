@@ -45,7 +45,7 @@ BACKUP_TIMEOUT=2h
 # 五字段 cron：分 时 日 月 周；每天 02:00；留空仅运行一次 / Five-field cron: minute hour day month weekday; empty = run once
 # 其他示例 / More examples: */30 * * * * = every 30 minutes; 0 */6 * * * = at 00:00, 06:00, 12:00, 18:00
 BACKUP_INTERVAL=0 2 * * *
-# cron 时区：默认北京时间；文件名仍使用 UTC / Cron timezone; object timestamps still use UTC
+# 调度和日志时区：默认北京时间，日志带 +08:00；文件名仍使用 UTC / Schedule and log timezone; object timestamps remain UTC
 BACKUP_TIMEZONE=Asia/Shanghai
 ```
 
@@ -160,3 +160,13 @@ kubectl -n backup logs -f deployment/mysql-s3-backup
 ```
 
 `ImagePullBackOff` 检查镜像地址和拉取 Secret；`mysqldump failed` 检查数据库网络、权限、密码与客户端兼容性；上传失败检查 S3 参数与桶权限。Pod Running 仅代表调度进程在运行，备份是否成功以 `backup uploaded` 日志及桶内文件为准。
+
+## 日志与时区 / Logs and timezone
+
+日志时间与计划时间统一使用 BACKUP_TIMEZONE（默认 Asia/Shanghai），使用带偏移的 ISO 时间，例如 `2026-10-31T12:00:00+08:00`。旧版日志前缀使用容器 UTC 时间，因此 04:00 与计划中的 12:00+08:00 是同一时刻，不是备份延迟。
+
+Log timestamps and scheduled execution times both use BACKUP_TIMEZONE, including the UTC offset. S3 object names intentionally remain UTC; `20261031T040017Z` is `2026-10-31T12:00:17+08:00`.
+
+每次备份打印开始、数据库范围、超时、dump/压缩开始与耗时、压缩文件字节数和 MiB、上传目标与耗时、整体结果与总耗时，以及下次备份时间和等待时长。不打印数据库密码、S3 密钥或 SQL 内容。日志按阶段输出，大型 dump 运行期间不持续打印百分比。
+
+Each backup logs the start, database scope, timeout, dump/compression duration, compressed size, upload destination and duration, total result and elapsed time, plus the next scheduled run. Credentials and SQL contents are not logged; progress is reported by stage, not as a continuous percentage.
