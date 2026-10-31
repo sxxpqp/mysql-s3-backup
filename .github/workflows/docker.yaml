@@ -45,4 +45,4 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="$GITHUB_REF_NAME"; fi
           TAGS=(--tag "$IMAGE:$TAG")
           if [[ "$GITHUB_REF" == refs/heads/main ]]; then TAGS+=(--tag "$IMAGE:latest"); fi
-          docker buildx build --no-cache --platform linux/amd64 "${TAGS[@]}" --push .
+          docker buildx build --no-cache --provenance=false --sbom=false --platform linux/amd64 "${TAGS[@]}" --push .
