@@ -20,6 +20,8 @@ registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest
 | --- | --- |
 | [.env.example](.env.example) | 带中英文注释的配置模板 |
 | [compose.yaml](compose.yaml) | Docker Compose 常驻备份 |
+| [deploy/k8s/namespace.yaml](deploy/k8s/namespace.yaml) | Kubernetes backup namespace |
+| [deploy/k8s/secret.yaml.example](deploy/k8s/secret.yaml.example) | 带中英文注释的 Secret YAML 模板 |
 | [deploy/k8s/deployment.yaml](deploy/k8s/deployment.yaml) | Kubernetes 单副本 Deployment |
 | [Dockerfile](Dockerfile) | Go 编译与运行镜像 |
 | [.github/workflows/docker.yaml](.github/workflows/docker.yaml) | 测试、镜像构建与发布 |
@@ -167,34 +169,52 @@ cron 使用标准五字段：**分 时 日 月 周**，不包含秒。
 
 使用 [deployment.yaml](deploy/k8s/deployment.yaml)，无需 CronJob。默认单副本、Recreate 更新策略、amd64 节点、Always 拉取策略。保持单副本，避免重复备份。
 
-### 4.1 创建 envFrom 引用的运行参数 Secret
+### 4.1 通过 Secret YAML 配置运行参数
 
-`envFrom.secretRef.name: mysql-s3-backup-env` 表示：把同一 namespace 中名为 `mysql-s3-backup-env` 的 Secret 内所有键值注入容器环境变量。Deployment 不会自动创建这个 Secret，必须先创建，否则 Pod 会报 `CreateContainerConfigError`。
-
-先在项目根目录准备 `.env`，填写真实 MySQL/S3 参数。已有 `.env` 时不要用模板覆盖：
+`envFrom.secretRef.name: mysql-s3-backup-env` 会将同一 namespace 中该 Secret 的所有键值注入容器。Deployment 不会自动创建 Secret，需要先准备 [secret.yaml.example](deploy/k8s/secret.yaml.example)。
 
 ```bash
-# 仅首次配置时执行
-cp .env.example .env
-chmod 600 .env
-vi .env
+cp deploy/k8s/secret.yaml.example deploy/k8s/secret.yaml
+chmod 600 deploy/k8s/secret.yaml
+vi deploy/k8s/secret.yaml
 ```
 
-再创建 namespace，并从 `.env` 导入 Secret。以下命令既可首次创建，也可更新已有 Secret：
+在 `stringData` 中直接填写字符串，不需要手动 Base64 编码。端口、空值和 cron 都保留引号。模板包含全部运行参数及中英文注释，结构如下：
 
-```bash
-kubectl create namespace backup --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n backup create secret generic mysql-s3-backup-env \
-  --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-s3-backup-env
+  namespace: backup
+type: Opaque
+stringData:
+  MYSQL_HOST: 'mysql.database.svc.cluster.local'
+  MYSQL_PORT: '3306'
+  MYSQL_USER: 'backup'
+  MYSQL_PASSWORD: 'replace-me'
+  MYSQL_DATABASES: ''
+  S3_ENDPOINT: 'https://s3.example.com'
+  S3_BUCKET: 'rook'
+  S3_PREFIX: 'mysql'
+  AWS_REGION: 'us-east-1'
+  AWS_ACCESS_KEY_ID: 'replace-me'
+  AWS_SECRET_ACCESS_KEY: 'replace-me'
+  BACKUP_TIMEOUT: '2h'
+  STARTUP_CHECK_TIMEOUT: '30s'
+  BACKUP_INTERVAL: '0 2 * * *'
+  BACKUP_TIMEZONE: 'Asia/Shanghai'
 ```
 
-确认 Secret 已创建（不输出其中的密码、密钥）：
+填写真实值后，先创建 namespace，再创建 Secret：
 
 ```bash
+kubectl apply -f deploy/k8s/namespace.yaml
+kubectl apply -f deploy/k8s/secret.yaml
 kubectl -n backup get secret mysql-s3-backup-env
 ```
 
-这个 Secret 存放 MySQL/S3 运行参数，与镜像拉取 Secret `registry-credentials` 是两个不同资源。若修改 namespace，Secret 和 Deployment 必须一起改到同一个 namespace。
+这个 Secret 保存 MySQL/S3 和定时参数，与镜像拉取 Secret `registry-credentials` 是两个不同资源。Deployment 和两个 Secret 必须位于同一 namespace。真实 `secret.yaml` 已加入 .gitignore；模板仅含占位符。不要提交含真实凭据的 YAML。
 
 ### 4.2 创建镜像拉取 Secret 并部署
 
@@ -218,21 +238,16 @@ kubectl -n backup rollout status deployment/mysql-s3-backup --timeout=180s
 kubectl -n backup logs -f deployment/mysql-s3-backup
 ```
 
-**Deployment 显式设置的 BACKUP_INTERVAL、BACKUP_TIMEZONE 优先于 Secret 同名值。** 修改计划请编辑 YAML 再 apply，或执行：
+Deployment 的运行参数统一从 Secret 读取，不再通过显式 env 覆盖定时参数。修改数据库、S3、cron 或时区时，编辑 `deploy/k8s/secret.yaml`，重新 apply 并重启：
 
 ```bash
-kubectl -n backup set env deployment/mysql-s3-backup \
-  BACKUP_INTERVAL='*/10 * * * *' BACKUP_TIMEZONE=Asia/Shanghai
-```
-
-修改 `.env` 数据库/S3 参数后，更新 Secret 并重启：
-
-```bash
-kubectl -n backup create secret generic mysql-s3-backup-env \
-  --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f deploy/k8s/secret.yaml
 kubectl -n backup rollout restart deployment/mysql-s3-backup
 kubectl -n backup rollout status deployment/mysql-s3-backup --timeout=180s
+kubectl -n backup logs -f deployment/mysql-s3-backup
 ```
+
+如果旧 Deployment 曾通过 `kubectl set env` 写入过变量，首次更新请先 apply 本仓库新版 deployment.yaml，并确认容器没有同名显式 env 覆盖 Secret；必要时执行 `kubectl -n backup set env deployment/mysql-s3-backup BACKUP_INTERVAL- BACKUP_TIMEZONE-` 清除旧覆盖。
 
 更新 latest 镜像同样需要 rollout restart；生产可将 YAML 镜像固定为成功发布的完整 commit SHA 标签。重启会中断正在运行的备份，尽量在空闲时更新；cron 模式重启后等待下一计划点。
 
@@ -307,7 +322,7 @@ gzip -dc app1-20261031T122000.123456789+0800.sql.gz \
 | upload backup 失败 | 检查 endpoint、区域、密钥、桶策略、容量和网络 |
 | ImagePullBackOff | 检查镜像地址、拉取 Secret 与 namespace |
 | 时间不符合预期 | 检查 BACKUP_TIMEZONE，当前日志与所有文件名统一使用配置时区 |
-| 修改 .env 未生效 | Compose 重建容器；Kubernetes 更新 Secret 后重启；检查显式 env 覆盖 |
+| 修改 .env 未生效 | Compose 重建容器；Kubernetes apply secret.yaml 后重启；检查旧显式 env 覆盖 |
 | 单次成功后不断重跑 | 单次模式配合自动重启；改用 run --rm，或设置 cron 常驻 |
 
 ## 9. 开发与镜像 CI

@@ -32,18 +32,13 @@ spec:
         - name: backup
           image: registry.cn-hangzhou.aliyuncs.com/sxxpqp/mysql-s3-backup:latest
           imagePullPolicy: Always
-          # 提前从项目根目录的 .env 创建运行参数 Secret / Create the runtime Secret before deployment:
-          # kubectl create namespace backup --dry-run=client -o yaml | kubectl apply -f -
-          # kubectl -n backup create secret generic mysql-s3-backup-env --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
+          # 复制 secret.yaml.example 为 secret.yaml 并填写参数 / Copy and edit the Secret template first.
+          # kubectl apply -f deploy/k8s/namespace.yaml
+          # kubectl apply -f deploy/k8s/secret.yaml
           # Secret 必须与 Deployment 位于同一 namespace / Secret must be in the same namespace.
           envFrom:
             - secretRef:
                 name: mysql-s3-backup-env
-          env:
-            - name: BACKUP_INTERVAL
-              value: "0 2 * * *"
-            - name: BACKUP_TIMEZONE
-              value: "Asia/Shanghai"
           resources:
             requests:
               cpu: 100m
